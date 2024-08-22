@@ -122,11 +122,11 @@ Function Send-MSGraphEmail {
 
 $tokenResponse = Connect-MSGraphAPI -AppID $AppID -TenantID $TenantID -AppSecret $AppSecret
 
-
 $secretArray = @()
 $certificateArray = @()
+$ssoCertificateArray = @()
 $apps = Get-MSGraphRequest -AccessToken $tokenResponse.access_token -Uri "https://graph.microsoft.com/v1.0/applications/" 
-
+$allApps = Get-MSGraphRequest -AccessToken $tokenResponse.access_token -Uri "https://graph.microsoft.com/v1.0/servicePrincipals"
 
 # Loops through each app and looks for secrets and certificates
 foreach ($app in $apps) {
@@ -163,7 +163,8 @@ foreach ($app in $apps) {
         }
     }
 
-
+    $currCertArray = @()
+    $hasValidCert = $false
     # Within each app look at each certificate
     $app.keyCredentials | foreach-object {
         # Adds to array if the certificate has an expiration date within $expirationDays (90) days
@@ -175,7 +176,7 @@ foreach ($app in $apps) {
             [int32]$daysUntilExpiration = (New-TimeSpan -Start ([System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now, "Pacific Standard Time")) -End $Date).Days
             
             if (($daysUntilExpiration -ne $null) -and ($daysUntilExpiration -le $expirationDays)) {
-                $certificateArray += $_ | Select-Object @{
+                $currCertArray += $_ | Select-Object @{
                     name = "id"; 
                     expr = { $id } 
                 }, 
@@ -191,13 +192,66 @@ foreach ($app in $apps) {
                     name = "Days Until Expiration"; 
                     expr = { $daysUntilExpiration } 
                 }
+            } else {
+                $hasValidCert = $true
             }
             $daysUntilExpiration = $null
             $certificateDisplayName = $null
         }
     }
+    if (-not $hasValidCert) {
+        $certificateArray += $currCertArray
+    }
 }
 
+# Filter for enterprise apps only
+$enterpriseApps = @()
+foreach ($app in $allApps) {
+    if ($app.Tags -contains "WindowsAzureActiveDirectoryIntegratedApp") {
+        $enterpriseApps += $app
+    }
+} 
+
+foreach ($app in $enterpriseApps) {
+    $currSsoCertArray = @()
+    $hasValidCert = $false
+    $app.keyCredentials | foreach-object {
+        # Adds to array if the secret has an expiration date within $expirationDays (90) days
+        if ($_.endDateTime -ne $null) {
+            [system.string]$ssoCertificateDisplayName = $_.displayName
+            [system.string]$id = $app.id
+            [system.string]$displayName = $app.displayName
+            $Date = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($_.endDateTime, 'Pacific Standard Time')
+            [int32]$daysUntilExpiration = (New-TimeSpan -Start ([System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now, "Pacific Standard Time")) -End $Date).Days
+            
+            if (($daysUntilExpiration -ne $null) -and ($daysUntilExpiration -le $expirationDays)) {
+                $currSsoCertArray += $_ | Select-Object @{
+                    name = "id"; 
+                    expr = { $id } 
+                }, 
+                @{
+                    name = "Application Name"; 
+                    expr = { $displayName } 
+                }, 
+                @{
+                    name = "SSO Certificate Name"; 
+                    expr = { $ssoCertificateDisplayName } 
+                },
+                @{
+                    name = "Days Until Expiration"; 
+                    expr = { $daysUntilExpiration } 
+                }
+            } else {
+                $hasValidCert = $true
+            }
+            $daysUntilExpiration = $null
+            $ssoCertificateDisplayName = $null
+        }
+    }
+    if (-not $hasValidCert) {
+        $ssoCertificateArray += $currSsoCertArray
+    }
+}
 
 # Define styles for the tables
 $style = @"
@@ -221,27 +275,34 @@ $style = @"
         border: none;
     }
     td, th {
-        padding: 5px 10px;
+        padding: 3px 8px;
         border-bottom: 1px solid #d1d1d1;
     }
 </style>
 "@
 
-
 # Generate HTML tables without the -Head parameter
 if ($secretArray -ne 0) {
     $secretTable = $secretArray | Sort-Object "Days Until Expiration" | Select-Object "Application Name", "Secret Name", "Days Until Expiration" | ConvertTo-Html -Fragment
 } else {
-    $secretTable = "<p>No apps with expiring secrets</p>"
+    $secretTable = "<p>No apps registrations with expiring secrets</p>"
 }
-
 
 if ($certificateArray -ne 0) {
     $certificateTable = $certificateArray | Sort-Object "Days Until Expiration" | Select-Object "Application Name", "Certificate Name", "Days Until Expiration" | ConvertTo-Html -Fragment
 } else {
-    $certificateTable = "<p>No apps with expiring certificates</p>"
+    $certificateTable = "<p>No app registrations with expiring certificates</p>"
 }
 
+if ($ssoCertificateArray -ne 0) {
+    $ssoCertificateTable = $ssoCertificateArray | Sort-Object "Days Until Expiration" | Select-Object "Application Name", "SSO Certificate Name", "Days Until Expiration" | ConvertTo-Html -Fragment
+} else {
+    $ssoCertificateTable = "<p>No enterprise apps with expiring certificates</p>"
+}
+
+$secretCount = $secretArray.Length
+$certCount = $certificateArray.Length
+$ssoCertCount = $ssoCertificateArray.Length
 
 # Combine tables with styling
 $combinedTable = @"
@@ -250,14 +311,23 @@ $combinedTable = @"
 $style
 </head>
 <body>
-<h2>Expiring Secrets</h2>$secretTable<h2>Expiring Certificates</h2>$certificateTable
+<h1>Weekly Secret & Certificate Report</h1>
+<p>Below are the secrets and certificates set to expire in 90 days. If an application has a secret that is within 90 days
+of expiring, but also one that expires later, then it will not be listed.<p>
+<h2>Expiring Secrets</h2>
+<h3>Count: $secretCount</h3>
+$secretTable
+<h2>Expiring Certificates</h2>
+<h3>Count: $certCount</h3>
+$certificateTable
+<h2>Expiring Enterprise App Certificates (SSO)</h2>
+<h3>Count: $ssoCertCount</h3>
+$ssoCertificateTable
 </body>
 </html>
 "@
 
-
 write-output "sending email"
-
 
 write-output $emailTo
 Send-MSGraphEmail -Uri "https://graph.microsoft.com/v1.0/users/$emailSender/sendMail" -AccessToken $tokenResponse.access_token -To $emailTo -Body $combinedTable
