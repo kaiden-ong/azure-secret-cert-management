@@ -1,5 +1,4 @@
-# 2024-08-20 pro edition
-# Variables are found under: automation accounts/mhs-shd-uw2-infr-appsecretexp-aa-001/shared resources/variables
+# Variables are found under: automation account/shared resources/variables
 $AppID = Get-AutomationVariable -Name 'appID' 
 $TenantID = Get-AutomationVariable -Name 'tenantID'
 $AppSecret = Get-AutomationVariable -Name 'appSecret'  
@@ -7,7 +6,7 @@ $AppSecret = Get-AutomationVariable -Name 'appSecret'
 
 [int32] $expirationDays = 90 # Finds secrets/certs expiring within this many days
 [string] $emailSender = "kaiden.ong000@gmail.com"
-[string[]]$emailTo = "kaiden.ong000@gmail.com" # To add more just separate with commas
+[string[]]$emailTo = ,"kaiden.ong000@gmail.com" # To add more just separate with commas
 
 
 # Establishes connection to the MS Graph API, returning a token that gives access to Azure resources 
@@ -215,31 +214,37 @@ foreach ($app in $allApps) {
 foreach ($app in $enterpriseApps) {
     $currSsoCertArray = @()
     $hasValidCert = $false
+    $signVerifyDup = @{}
     $app.keyCredentials | foreach-object {
         # Adds to array if the secret has an expiration date within $expirationDays (90) days
         if ($_.endDateTime -ne $null) {
             [system.string]$ssoCertificateDisplayName = $_.displayName
             [system.string]$id = $app.id
-            [system.string]$displayName = $app.displayName
+            [system.string]$displayName = $app.appDisplayName
             $Date = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($_.endDateTime, 'Pacific Standard Time')
             [int32]$daysUntilExpiration = (New-TimeSpan -Start ([System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now, "Pacific Standard Time")) -End $Date).Days
             
             if (($daysUntilExpiration -ne $null) -and ($daysUntilExpiration -le $expirationDays)) {
-                $currSsoCertArray += $_ | Select-Object @{
-                    name = "id"; 
-                    expr = { $id } 
-                }, 
-                @{
-                    name = "Application Name"; 
-                    expr = { $displayName } 
-                }, 
-                @{
-                    name = "SSO Certificate Name"; 
-                    expr = { $ssoCertificateDisplayName } 
-                },
-                @{
-                    name = "Days Until Expiration"; 
-                    expr = { $daysUntilExpiration } 
+                if (-not $signVerifyDup.Contains($_.customKeyIdentifier)) {
+                    $currSsoCertArray += $_ | Select-Object @{
+                        name = "id"; 
+                        expr = { $id } 
+                    }, 
+                    @{
+                        name = "Application Name"; 
+                        expr = { $displayName } 
+                    }, 
+                    @{
+                        name = "SSO Certificate Name"; 
+                        expr = { $ssoCertificateDisplayName } 
+                    },
+                    @{
+                        name = "Days Until Expiration"; 
+                        expr = { $daysUntilExpiration } 
+                    }
+
+                    # Mark this certificate as seen
+                    $signVerifyDup[$_.customKeyIdentifier] = $true
                 }
             } else {
                 $hasValidCert = $true
